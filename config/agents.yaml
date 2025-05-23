@@ -1,0 +1,41 @@
+agents:
+  - name: InfrastructureMonitor
+    description: Monitors the client's infrastructure for performance and availability.
+    enabled: true
+
+  - name: RCAAnalyzer
+    description: Performs root cause analysis on detected issues.
+    enabled: true
+
+  - name: CostOptimizer
+    description: Analyzes and optimizes costs associated with cloud resources.
+    enabled: true
+
+  - name: ReportGenerator
+    description: Generates reports based on monitored data.
+    enabled: true
+
+  - name: DeploymentManager
+    description: Handles deployment tasks for applications.
+    enabled: true
+
+  - name: KubernetesAgent
+    description: Integrates with the Kubernetes management agent.
+    enabled: true
+
+communication:
+  a2a_protocol:
+    enabled: true
+    timeout: 30
+
+logging:
+  level: INFO
+  file: logs/devops_sentinel.log
+
+azure:
+  connection_string: "Your_Azure_Connection_String"
+  resource_group: "Your_Resource_Group_Name"
+
+kubernetes:
+  config_path: "/path/to/kubeconfig"
+  namespace: "default"

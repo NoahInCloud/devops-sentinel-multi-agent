@@ -1,0 +1,78 @@
+# Azure Configuration for DevOps Sentinel Multi-Agent System
+azure:
+  # Authentication settings (override with environment variables)
+  subscription_id: "your_subscription_id"
+  resource_group: "your_resource_group"
+  client_id: "your_client_id"
+  client_secret: "your_client_secret"
+  tenant_id: "your_tenant_id"
+  
+  # Azure OpenAI settings
+  openai:
+    endpoint: "your_openai_endpoint"
+    api_key: "your_openai_api_key"
+    deployment_name: "your_deployment_name"
+    api_version: "2024-02-01"
+    model_name: "gpt-4"
+    
+  # Monitoring configuration
+  monitoring:
+    enabled: true
+    interval: 300  # Check interval in seconds
+    metrics:
+      - "cpu_percentage"
+      - "memory_percentage"
+      - "disk_usage"
+      - "network_in"
+      - "network_out"
+    alert_thresholds:
+      cpu_high: 80
+      memory_high: 85
+      disk_high: 90
+      
+  # Cost analysis configuration
+  cost_analysis:
+    enabled: true
+    daily_threshold: 1000  # Daily spending alert threshold
+    monthly_threshold: 30000  # Monthly spending alert threshold
+    currency: "USD"
+    cost_optimization:
+      rightsizing_enabled: true
+      unused_resources_detection: true
+      reserved_instances_recommendations: true
+      
+  # Deployment configuration
+  deployment:
+    enabled: true
+    default_region: "East US"
+    environments:
+      - name: "development"
+        region: "East US"
+        resource_group_suffix: "-dev"
+      - name: "staging"
+        region: "West US"
+        resource_group_suffix: "-staging"
+      - name: "production"
+        region: "East US 2"
+        resource_group_suffix: "-prod"
+    
+  # Resource management
+  resource_management:
+    auto_scaling: true
+    backup_retention_days: 30
+    tags:
+      environment: "devops-sentinel"
+      project: "multi-agent-system"
+      managed_by: "devops-sentinel"
+      
+  # Security settings
+  security:
+    key_vault_enabled: true
+    managed_identity_enabled: true
+    rbac_enabled: true
+    
+  # Logging and telemetry
+  logging:
+    log_analytics_workspace: "your_workspace_id"
+    application_insights: "your_app_insights_id"
+    retention_days: 90

@@ -1,0 +1,152 @@
+# Kubernetes Configuration for DevOps Sentinel Multi-Agent System
+kubernetes:
+  # Cluster connection settings
+  cluster:
+    name: "devops-sentinel-cluster"
+    namespace: "devops-sentinel"
+    context: "default"
+    kubeconfig_path: "~/.kube/config"  # Override with KUBECONFIG env var
+    
+  # kagent integration settings
+  kagent:
+    enabled: true
+    repository_url: "https://github.com/NoahInCloud/kagent"
+    branch: "main"
+    local_path: "./kagent"
+    sync_interval: 300  # seconds
+    
+    # kagent API settings
+    api:
+      endpoint: "http://kagent-service:8080"
+      version: "v1"
+      timeout: 30
+      retry_attempts: 3
+      
+  # Resource monitoring
+  monitoring:
+    enabled: true
+    namespaces:
+      - "default"
+      - "kube-system"
+      - "devops-sentinel"
+    metrics:
+      - "pod_cpu_usage"
+      - "pod_memory_usage"
+      - "node_cpu_usage"
+      - "node_memory_usage"
+      - "storage_usage"
+      - "network_io"
+    collection_interval: 60  # seconds
+    
+  # Resource management
+  resource_management:
+    auto_scaling:
+      enabled: true
+      min_replicas: 1
+      max_replicas: 10
+      target_cpu_utilization: 70
+      target_memory_utilization: 80
+      
+    resource_limits:
+      default_cpu_request: "100m"
+      default_cpu_limit: "500m"
+      default_memory_request: "128Mi"
+      default_memory_limit: "512Mi"
+      
+  # Deployment settings
+  deployment:
+    strategy: "RollingUpdate"
+    max_unavailable: 1
+    max_surge: 1
+    progress_deadline_seconds: 600
+    
+    # Environment-specific settings
+    environments:
+      development:
+        replicas: 1
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "200m"
+            memory: "256Mi"
+            
+      staging:
+        replicas: 2
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+            
+      production:
+        replicas: 3
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+          limits:
+            cpu: "1000m"
+            memory: "1Gi"
+            
+  # Security settings
+  security:
+    rbac_enabled: true
+    service_account: "devops-sentinel-sa"
+    pod_security_context:
+      run_as_non_root: true
+      run_as_user: 1000
+      fs_group: 2000
+      
+  # Networking
+  networking:
+    service_mesh: "istio"  # or "linkerd", "consul-connect"
+    ingress:
+      enabled: true
+      class: "nginx"
+      annotations:
+        nginx.ingress.kubernetes.io/rewrite-target: /
+      tls:
+        enabled: true
+        secret_name: "devops-sentinel-tls"
+        
+  # Storage
+  storage:
+    persistent_volumes:
+      enabled: true
+      storage_class: "fast-ssd"
+      size: "10Gi"
+      access_mode: "ReadWriteOnce"
+      
+  # Logging and observability
+  logging:
+    enabled: true
+    log_level: "INFO"
+    structured_logging: true
+    output_format: "json"
+    
+  observability:
+    metrics:
+      prometheus_enabled: true
+      grafana_enabled: true
+    tracing:
+      jaeger_enabled: true
+    alerting:
+      alert_manager_enabled: true
+      
+  # Health checks
+  health_checks:
+    liveness_probe:
+      initial_delay_seconds: 30
+      period_seconds: 10
+      timeout_seconds: 5
+      failure_threshold: 3
+      
+    readiness_probe:
+      initial_delay_seconds: 5
+      period_seconds: 5
+      timeout_seconds: 3
+      failure_threshold: 3

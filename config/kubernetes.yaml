@@ -1,0 +1,40 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: devops-sentinel-config
+  namespace: devops
+data:
+  agents.yaml: |
+    # Configuration for agents
+    agent:
+      enabled: true
+      types:
+        - infrastructure_monitor
+        - rca_analyzer
+        - cost_optimizer
+        - report_generator
+        - deployment_manager
+        - kubernetes_agent
+  azure.yaml: |
+    # Configuration for Azure integration
+    azure:
+      subscription_id: YOUR_SUBSCRIPTION_ID
+      resource_group: YOUR_RESOURCE_GROUP
+      region: YOUR_REGION
+  kubernetes.yaml: |
+    # Configuration for Kubernetes integration
+    kubernetes:
+      cluster_name: YOUR_CLUSTER_NAME
+      namespace: YOUR_NAMESPACE
+      context: YOUR_CONTEXT
+      kagent_url: http://kagent-service:port
+      auth:
+        token: YOUR_AUTH_TOKEN
+        ca_cert: YOUR_CA_CERT_PATH
+      resources:
+        limits:
+          cpu: "500m"
+          memory: "512Mi"
+        requests:
+          cpu: "250m"
+          memory: "256Mi"

@@ -1,0 +1,35 @@
+# Core dependencies
+azure-communication-callautomation==1.4.0b1
+quart
+numpy
+semantic-kernel
+pydantic
+requests
+websocket-client
+python-dotenv
+
+# Azure MCP dependencies
+mcp
+
+# Azure SDK dependencies (kept for fallback)
+azure-identity
+azure-mgmt-resource
+azure-mgmt-monitor
+azure-mgmt-compute
+azure-mgmt-billing
+azure-mgmt-subscription
+azure-mgmt-containerservice
+azure-eventgrid
+
+# Additional dependencies
+kubernetes
+chainlit
+fastapi
+uvicorn
+sqlalchemy
+redis
+pyyaml
+
+# Testing
+pytest
+pytest-asyncio
