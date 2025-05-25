@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from quart import Quart, request, websocket, jsonify
-from ..core.orchestrator import DevOpsOrchestrator
+from core.orchestrator import DevOpsOrchestrator
 
 
 class ChatInterface:

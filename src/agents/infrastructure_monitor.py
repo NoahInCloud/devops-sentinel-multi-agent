@@ -1,238 +1,405 @@
-"""Infrastructure monitoring agent for Azure resources using Azure MCP."""
+"""Infrastructure monitoring agent for Azure resources using real Azure APIs."""
 
 import asyncio
 import json
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-# Use Azure MCP instead of direct SDK imports
-from utils.azure_mcp_client import azure_mcp_client
-from .base_agent import BaseDevOpsAgent, DevOpsAgentPlugin
+from azure.monitor.query import MetricAggregationType
+from azure.core.exceptions import AzureError
+
+from utils.azure_client import get_azure_client_manager
+from agents.base_agent import BaseDevOpsAgent, DevOpsAgentPlugin
+from semantic_kernel.functions import kernel_function
 
 
 class InfrastructureMonitorPlugin(DevOpsAgentPlugin):
     """Plugin for infrastructure monitoring capabilities."""
     
-    def __init__(self, subscription_id: Optional[str] = None): # Made subscription_id optional as MCP might not always need it explicitly
+    def __init__(self, subscription_id: str):
         super().__init__("infrastructure_monitor")
         self.subscription_id = subscription_id
-        # SDK clients removed, will use azure_mcp_client
+        self.azure_clients = get_azure_client_manager(subscription_id)
         
+    @kernel_function(name="get_resource_health", description="Get health status of Azure resources")
     async def get_resource_health(self, resource_group: Optional[str] = None) -> str:
-        """Get health status of Azure resources using Azure MCP."""
+        """Get health status of Azure resources using real Azure APIs."""
         try:
-            self.logger.info(f"Checking resource health via MCP for subscription: {self.subscription_id or 'default'}")
+            self.logger.info(f"Checking resource health for subscription: {self.subscription_id}")
             
-            cli_command = "az resource list"
+            resource_client = self.azure_clients.get_resource_client()
+            monitor_client = self.azure_clients.get_monitor_client()
+            
+            # Get resources
             if resource_group:
-                cli_command += f" --resource-group \\\"{resource_group}\\\""
-            if self.subscription_id:
-                 cli_command += f" --subscription \\\"{self.subscription_id}\\\""
-
-            response = await azure_mcp_client.execute_azure_cli(cli_command)
+                resources = list(resource_client.resources.list_by_resource_group(resource_group))
+            else:
+                resources = list(resource_client.resources.list())
             
-            if response.get('status') == 'error' or 'error' in response or not response.get('stdout'):
-                error_message = response.get('error', response.get('stderr', 'Unknown error from MCP'))
-                self.logger.error(f"Error from MCP getting resource list: {error_message}")
-                return f"Error checking resource health via MCP: {error_message}"
-
-            try:
-                resources = json.loads(response['stdout'])
-            except json.JSONDecodeError as e:
-                self.logger.error(f"Failed to parse JSON response from MCP: {str(e)}\\nResponse: {response['stdout']}")
-                return f"Error parsing MCP response: {str(e)}"
-
-            healthy_count = 0
-            total_count = len(resources)
+            total_resources = len(resources)
+            healthy_resources = 0
+            warning_resources = 0
+            critical_resources = 0
             issues = []
             
-            for resource in resources:
-                # Check basic resource status
-                if resource.get('provisioningState') == 'Succeeded':
-                    healthy_count += 1
-                else:
-                    issues.append(f"{resource.get('name', 'Unknown Resource')}: {resource.get('provisioningState', 'Unknown')}")
+            # Check each resource
+            for resource in resources[:50]:  # Limit to first 50 for performance
+                try:
+                    # Get resource health using availability status
+                    resource_id = resource.id
+                    
+                    # Check if resource has recent metrics (indicates it's active)
+                    end_time = datetime.utcnow()
+                    start_time = end_time - timedelta(hours=1)
+                    
+                    # Get metrics based on resource type
+                    if resource.type.lower().startswith('microsoft.compute/virtualmachines'):
+                        metric_names = ["Percentage CPU", "Available Memory Bytes"]
+                    elif resource.type.lower().startswith('microsoft.storage/storageaccounts'):
+                        metric_names = ["UsedCapacity", "Availability"]
+                    elif resource.type.lower().startswith('microsoft.sql/servers/databases'):
+                        metric_names = ["cpu_percent", "storage_percent"]
+                    else:
+                        metric_names = []
+                    
+                    is_healthy = True
+                    
+                    if metric_names:
+                        for metric_name in metric_names:
+                            try:
+                                metrics = monitor_client.metrics.list(
+                                    resource_id,
+                                    timespan=f"{start_time}/{end_time}",
+                                    interval="PT5M",
+                                    metricnames=metric_name,
+                                    aggregation="Average"
+                                )
+                                
+                                for metric in metrics.value:
+                                    for timeseries in metric.timeseries:
+                                        for data in timeseries.data:
+                                            if data.average is not None:
+                                                # Check thresholds
+                                                if metric_name in ["Percentage CPU", "cpu_percent"]:
+                                                    if data.average > 90:
+                                                        is_healthy = False
+                                                        issues.append(f"{resource.name}: High CPU usage ({data.average:.1f}%)")
+                                                elif metric_name == "storage_percent":
+                                                    if data.average > 85:
+                                                        is_healthy = False
+                                                        issues.append(f"{resource.name}: High storage usage ({data.average:.1f}%)")
+                            except:
+                                # Metric not available for this resource
+                                pass
+                    
+                    if is_healthy:
+                        healthy_resources += 1
+                    else:
+                        warning_resources += 1
                         
-            health_percentage = (healthy_count / total_count * 100) if total_count > 0 else 0
+                except Exception as e:
+                    # Resource health check failed
+                    critical_resources += 1
+                    issues.append(f"{resource.name}: Health check failed - {str(e)[:50]}")
             
-            result_str = f"Infrastructure Health Report (via MCP):\\n"
-            result_str += f"- Total Resources: {total_count}\\n"
-            result_str += f"- Healthy Resources: {healthy_count}\\n"
-            result_str += f"- Health Percentage: {health_percentage:.1f}%\\n"
+            health_percentage = (healthy_resources / total_resources * 100) if total_resources > 0 else 0
+            
+            result = f"Infrastructure Health Report (Real Azure Data):\n\n"
+            result += f"📊 Overview:\n"
+            result += f"• Total Resources: {total_resources}\n"
+            result += f"• Healthy Resources: {healthy_resources}\n"
+            result += f"• Resources with Warnings: {warning_resources}\n"
+            result += f"• Critical Resources: {critical_resources}\n"
+            result += f"• Overall Health: {health_percentage:.1f}%\n"
+            
+            if resource_group:
+                result += f"• Resource Group: {resource_group}\n"
             
             if issues:
-                result_str += f"\\nIssues Found:\\n"
-                for issue in issues[:5]:  # Limit to first 5 issues
-                    result_str += f"- {issue}\\n"
+                result += f"\n⚠️ Issues Found:\n"
+                for issue in issues[:10]:  # Show first 10 issues
+                    result += f"• {issue}\n"
+                if len(issues) > 10:
+                    result += f"• ... and {len(issues) - 10} more issues\n"
                     
-            return result_str
+            return result
             
         except Exception as e:
-            self.logger.error(f"Error checking resource health via MCP: {str(e)}")
-            return f"Error checking resource health via MCP: {str(e)}"
+            self.logger.error(f"Error checking resource health: {str(e)}")
+            return f"Error checking resource health: {str(e)}"
     
-    async def get_metrics(self, resource_id: str, metric_names: str) -> str: # Changed metric_name to metric_names for az cli
-        """Get metrics for a specific Azure resource using Azure MCP."""
+    @kernel_function(name="get_vm_metrics", description="Get metrics for virtual machines")
+    async def get_vm_metrics(self, vm_name: Optional[str] = None, resource_group: Optional[str] = None) -> str:
+        """Get metrics for Azure VMs."""
         try:
-            self.logger.info(f"Getting metrics via MCP for resource: {resource_id}, metrics: {metric_names}")
+            compute_client = self.azure_clients.get_compute_client()
+            metrics_client = self.azure_clients.get_metrics_query_client()
             
-            end_time = datetime.utcnow()
-            start_time = end_time - timedelta(hours=1)
-            timespan = f"{start_time.isoformat()}/{end_time.isoformat()}"
-            
-            # Note: `az monitor metrics list` expects metric names separated by spaces.
-            cli_command = f"az monitor metrics list --resource \\\"{resource_id}\\\" --metrics {metric_names} --interval PT5M --timespan \\\"{timespan}\\\""
-            if self.subscription_id:
-                cli_command += f" --subscription \\\"{self.subscription_id}\\\""
-
-            response = await azure_mcp_client.execute_azure_cli(cli_command)
-
-            if response.get('status') == 'error' or 'error' in response or not response.get('stdout'):
-                error_message = response.get('error', response.get('stderr', 'Unknown error from MCP'))
-                self.logger.error(f"Error from MCP getting metrics: {error_message}")
-                return f"Error getting metrics via MCP: {error_message}"
-
-            try:
-                metrics_data = json.loads(response['stdout'])
-            except json.JSONDecodeError as e:
-                self.logger.error(f"Failed to parse JSON response from MCP: {str(e)}\\nResponse: {response['stdout']}")
-                return f"Error parsing MCP response for metrics: {str(e)}"
-            
-            result_str = f"Metrics for {metric_names} on {resource_id} (via MCP):\\n"
-            if metrics_data and 'value' in metrics_data:
-                for metric in metrics_data['value']:
-                    result_str += f"Metric: {metric.get('name', {}).get('value', 'Unknown Metric')}\\n"
-                    if metric.get('timeseries'):
-                        for ts in metric['timeseries']:
-                            if ts.get('data'):
-                                latest_data = ts['data'][-1] if ts['data'] else None
-                                if latest_data:
-                                    # Common properties are average, total, minimum, maximum, count
-                                    value = latest_data.get('average', latest_data.get('total', latest_data.get('count', 'N/A')))
-                                    result_str += f"- Latest Value: {value}\\n"
-                                    result_str += f"- Timestamp: {latest_data.get('timeStamp')}\\n"
-                    else:
-                        result_str += "- No timeseries data available\\n"
+            # Get VMs
+            if vm_name and resource_group:
+                vms = [compute_client.virtual_machines.get(resource_group, vm_name)]
+            elif resource_group:
+                vms = list(compute_client.virtual_machines.list(resource_group))
             else:
-                result_str += "No metrics data returned or data is not in expected format.\\n"
-                        
-            return result_str
+                vms = list(compute_client.virtual_machines.list_all())
             
-        except Exception as e:
-            self.logger.error(f"Error getting metrics via MCP: {str(e)}")
-            return f"Error getting metrics via MCP: {str(e)}"
-    
-    async def check_alerts(self) -> str:
-        """Check for active alerts in the subscription using Azure MCP."""
-        try:
-            self.logger.info(f"Checking for active alerts via MCP for subscription: {self.subscription_id or 'default'}")
+            result = f"Virtual Machine Metrics Report:\n\n"
             
-            cli_command = "az monitor alert list" # This lists metric alerts. For activity log alerts: az monitor activity-log alert list
-            if self.subscription_id:
-                cli_command += f" --subscription \\\"{self.subscription_id}\\\""
-
-            response = await azure_mcp_client.execute_azure_cli(cli_command)
-
-            if response.get('status') == 'error' or 'error' in response or not response.get('stdout'):
-                error_message = response.get('error', response.get('stderr', 'Unknown error from MCP'))
-                self.logger.error(f"Error from MCP checking alerts: {error_message}")
-                return f"Error checking alerts via MCP: {error_message}"
-
-            try:
-                alerts = json.loads(response['stdout'])
-            except json.JSONDecodeError as e:
-                self.logger.error(f"Failed to parse JSON response from MCP: {str(e)}\\nResponse: {response['stdout']}")
-                return f"Error parsing MCP response for alerts: {str(e)}"
-
-            active_alerts_count = 0
-            alert_details = []
-
-            for alert in alerts:
-                if alert.get('enabled', False): # 'enabled' might not be the direct field for "active", depends on alert type
-                    active_alerts_count +=1
-                    alert_details.append({
-                        'name': alert.get('name', 'Unknown Alert'),
-                        'severity': alert.get('properties', {}).get('severity', 'Unknown'),
-                        'resourceGroup': alert.get('resourceGroup', 'N/A'),
-                        'condition': alert.get('properties', {}).get('condition', {}).get('allOf', [{}])[0].get('metricName', 'N/A')
-                    })
-            
-            result_str = f"Alert Status (via MCP):\\n"
-            result_str += f"- Total Alert Rules Found: {len(alerts)}\\n\" # This is total rules, not necessarily "active" alerts firing
-            result_str += f"- Enabled Alert Rules: {active_alerts_count}\\n\" # More accurately, enabled rules
-            
-            if alert_details:
-                result_str += "\\nEnabled Alert Rule Details (first 5):\\n"
-                for alert_info in alert_details[:5]:
-                    result_str += f"- Name: {alert_info['name']}, RG: {alert_info['resourceGroup']}, Severity: {alert_info['severity']}, Condition: {alert_info['condition']}\\n"
+            for vm in vms[:10]:  # Limit to 10 VMs
+                result += f"\n🖥️ VM: {vm.name}\n"
+                result += f"• Location: {vm.location}\n"
+                result += f"• Size: {vm.hardware_profile.vm_size}\n"
+                result += f"• Status: {vm.provisioning_state}\n"
+                
+                # Get metrics
+                try:
+                    end_time = datetime.utcnow()
+                    start_time = end_time - timedelta(hours=1)
                     
-            return result_str
+                    response = await metrics_client.query_resource(
+                        resource_uri=vm.id,
+                        metric_names=["Percentage CPU", "Network In Total", "Network Out Total", "Disk Read Bytes", "Disk Write Bytes"],
+                        timespan=(start_time, end_time),
+                        granularity=timedelta(minutes=5),
+                        aggregations=[MetricAggregationType.AVERAGE, MetricAggregationType.MAXIMUM]
+                    )
+                    
+                    for metric in response.metrics:
+                        if metric.timeseries:
+                            for timeseries in metric.timeseries:
+                                if timeseries.data:
+                                    latest = timeseries.data[-1]
+                                    if metric.name == "Percentage CPU" and latest.average is not None:
+                                        result += f"• CPU Usage: {latest.average:.1f}% (avg), {latest.maximum:.1f}% (max)\n"
+                                    elif metric.name == "Network In Total" and latest.average is not None:
+                                        result += f"• Network In: {latest.average / 1024 / 1024:.2f} MB\n"
+                                    elif metric.name == "Network Out Total" and latest.average is not None:
+                                        result += f"• Network Out: {latest.average / 1024 / 1024:.2f} MB\n"
+                                        
+                except Exception as e:
+                    result += f"• Metrics unavailable: {str(e)[:50]}\n"
+            
+            return result
             
         except Exception as e:
-            self.logger.error(f"Error checking alerts via MCP: {str(e)}")
-            return f"Error checking alerts via MCP: {str(e)}"
+            self.logger.error(f"Error getting VM metrics: {str(e)}")
+            return f"Error getting VM metrics: {str(e)}"
+    
+    @kernel_function(name="check_alerts", description="Check for active alerts in Azure Monitor")
+    async def check_alerts(self) -> str:
+        """Check for active alerts using Azure Monitor."""
+        try:
+            monitor_client = self.azure_clients.get_monitor_client()
+            
+            # Get alert rules
+            alert_rules = list(monitor_client.metric_alerts.list_by_subscription())
+            
+            # Get activity log alerts
+            activity_alerts = list(monitor_client.activity_log_alerts.list_by_subscription_id())
+            
+            result = f"Azure Monitor Alerts Report:\n\n"
+            result += f"📊 Summary:\n"
+            result += f"• Total Metric Alert Rules: {len(alert_rules)}\n"
+            result += f"• Total Activity Log Alerts: {len(activity_alerts)}\n\n"
+            
+            # Check metric alerts
+            enabled_alerts = 0
+            critical_alerts = []
+            high_alerts = []
+            
+            for alert in alert_rules:
+                if alert.enabled:
+                    enabled_alerts += 1
+                    
+                    # Check severity
+                    severity = alert.severity
+                    alert_info = {
+                        'name': alert.name,
+                        'description': alert.description or 'No description',
+                        'severity': severity,
+                        'criteria': []
+                    }
+                    
+                    # Get criteria
+                    if hasattr(alert, 'criteria') and hasattr(alert.criteria, 'all_of'):
+                        for criterion in alert.criteria.all_of:
+                            alert_info['criteria'].append(f"{criterion.metric_name} {criterion.operator} {criterion.threshold}")
+                    
+                    if severity == 0 or severity == 1:  # Critical or Error
+                        critical_alerts.append(alert_info)
+                    elif severity == 2:  # Warning
+                        high_alerts.append(alert_info)
+            
+            result += f"⚠️ Alert Status:\n"
+            result += f"• Enabled Alert Rules: {enabled_alerts}\n"
+            result += f"• Critical/Error Alerts: {len(critical_alerts)}\n"
+            result += f"• Warning Alerts: {len(high_alerts)}\n\n"
+            
+            if critical_alerts:
+                result += f"🚨 Critical Alerts:\n"
+                for alert in critical_alerts[:5]:
+                    result += f"• {alert['name']}: {alert['description']}\n"
+                    if alert['criteria']:
+                        result += f"  Conditions: {', '.join(alert['criteria'][:2])}\n"
+            
+            # Check recent alert occurrences (activity log)
+            try:
+                end_time = datetime.utcnow()
+                start_time = end_time - timedelta(hours=24)
+                
+                filter_str = f"eventTimestamp ge '{start_time.isoformat()}' and eventTimestamp le '{end_time.isoformat()}' and category eq 'Alert'"
+                
+                events = monitor_client.activity_logs.list(filter=filter_str)
+                recent_alerts = []
+                
+                for event in events:
+                    if hasattr(event, 'category') and event.category.value == 'Alert':
+                        recent_alerts.append({
+                            'time': event.event_timestamp,
+                            'resource': event.resource_id.split('/')[-1] if event.resource_id else 'Unknown',
+                            'status': event.status.value if hasattr(event, 'status') else 'Unknown'
+                        })
+                
+                if recent_alerts:
+                    result += f"\n📅 Recent Alert Activity (Last 24h):\n"
+                    for alert in recent_alerts[:5]:
+                        result += f"• {alert['time'].strftime('%Y-%m-%d %H:%M')} - {alert['resource']} ({alert['status']})\n"
+                        
+            except Exception as e:
+                self.logger.warning(f"Could not fetch recent alert activity: {str(e)}")
+            
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Error checking alerts: {str(e)}")
+            return f"Error checking alerts: {str(e)}"
+    
+    @kernel_function(name="get_resource_recommendations", description="Get Azure Advisor recommendations")
+    async def get_resource_recommendations(self) -> str:
+        """Get recommendations from Azure Advisor."""
+        try:
+            # Note: Azure Advisor API requires additional setup
+            # For now, provide general monitoring recommendations based on metrics
+            
+            result = f"Infrastructure Recommendations:\n\n"
+            
+            # Check for common issues
+            compute_client = self.azure_clients.get_compute_client()
+            
+            # Check for stopped VMs
+            stopped_vms = []
+            oversized_vms = []
+            
+            for vm in compute_client.virtual_machines.list_all():
+                # Get instance view
+                try:
+                    instance_view = compute_client.virtual_machines.instance_view(
+                        vm.id.split('/')[4],  # resource group
+                        vm.name
+                    )
+                    
+                    # Check power state
+                    for status in instance_view.statuses:
+                        if status.code.startswith('PowerState/') and status.code != 'PowerState/running':
+                            stopped_vms.append(vm.name)
+                            
+                except:
+                    pass
+            
+            result += "💡 Recommendations:\n\n"
+            
+            if stopped_vms:
+                result += f"1. **Stopped VMs** ({len(stopped_vms)} found)\n"
+                result += f"   Consider deallocating or removing stopped VMs to save costs:\n"
+                for vm in stopped_vms[:3]:
+                    result += f"   • {vm}\n"
+                if len(stopped_vms) > 3:
+                    result += f"   • ... and {len(stopped_vms) - 3} more\n"
+                result += "\n"
+            
+            result += "2. **Performance Monitoring**\n"
+            result += "   • Enable Azure Monitor for all critical resources\n"
+            result += "   • Set up alerts for CPU > 80% and Memory > 85%\n"
+            result += "   • Configure auto-scaling for variable workloads\n\n"
+            
+            result += "3. **Security**\n"
+            result += "   • Enable Azure Security Center\n"
+            result += "   • Review network security group rules\n"
+            result += "   • Enable diagnostic logs for all resources\n\n"
+            
+            result += "4. **Cost Optimization**\n"
+            result += "   • Review and rightsize underutilized VMs\n"
+            result += "   • Consider Reserved Instances for stable workloads\n"
+            result += "   • Enable auto-shutdown for dev/test resources\n"
+            
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Error getting recommendations: {str(e)}")
+            return f"Error getting recommendations: {str(e)}"
 
 
 class InfrastructureMonitorAgent(BaseDevOpsAgent):
     """Agent responsible for monitoring Azure infrastructure."""
     
-    def __init__(self, subscription_id: Optional[str] = None): # Allow optional subscription_id
-        super().__init__("InfrastructureMonitor", "Monitors Azure infrastructure health and metrics using Azure MCP")
+    def __init__(self, subscription_id: str):
+        super().__init__(
+            name="InfrastructureMonitor",
+            description="Monitors Azure infrastructure health and metrics",
+            agent_type="infrastructure_monitor"
+        )
         self.subscription_id = subscription_id
         self.capabilities = [
             "resource_health_monitoring", 
             "metrics_collection", 
             "alert_management",
-            "performance_tracking"
+            "performance_tracking",
+            "vm_monitoring",
+            "recommendations"
         ]
         
     async def _setup_plugins(self):
         """Setup infrastructure monitoring plugins."""
-        # Ensure MCP client is started (ideally by orchestrator or a global startup)
-        if not azure_mcp_client.is_connected:
-            self.logger.info("Attempting to start Azure MCP server from InfrastructureMonitorAgent...")
-            await azure_mcp_client.start_mcp_server()
-            if not azure_mcp_client.is_connected:
-                self.logger.error("Failed to start Azure MCP server. Monitoring capabilities will be limited.")
-
         self.monitor_plugin = InfrastructureMonitorPlugin(self.subscription_id)
-        self.kernel.add_plugin(
-            plugin=self.monitor_plugin, 
-            plugin_name="infrastructure_monitor",
-            description="Infrastructure monitoring capabilities via Azure MCP"
-        )
+        
+        # Add plugin to kernel if available
+        if self.kernel:
+            self.kernel.add_plugin(
+                self.monitor_plugin, 
+                "InfrastructureMonitor"
+            )
         
     async def process_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Process infrastructure monitoring requests."""
         action = request.get('action')
         params = request.get('parameters', {})
         
-        # Ensure MCP client is ready before processing
-        if not azure_mcp_client.is_connected:
-            await azure_mcp_client.start_mcp_server() # Attempt to start if not connected
-            if not azure_mcp_client.is_connected:
-                 return {
-                    'agent': self.name,
-                    'action': action,
-                    'status': 'error',
-                    'error': 'Azure MCP Server is not connected. Cannot process request.',
-                    'timestamp': datetime.utcnow().isoformat()
-                }
-
         try:
             if action == 'check_health':
                 result = await self.monitor_plugin.get_resource_health(
                     params.get('resource_group')
                 )
-            elif action == 'get_metrics':
-                result = await self.monitor_plugin.get_metrics(
-                    params.get('resource_id', ''),
-                    params.get('metric_names', 'Percentage CPU') # Changed to metric_names
+            elif action == 'get_vm_metrics':
+                result = await self.monitor_plugin.get_vm_metrics(
+                    params.get('vm_name'),
+                    params.get('resource_group')
                 )
             elif action == 'check_alerts':
                 result = await self.monitor_plugin.check_alerts()
+            elif action == 'get_recommendations':
+                result = await self.monitor_plugin.get_resource_recommendations()
             else:
-                result = f"Unknown action: {action}"
+                # Use AI to analyze the request
+                analysis_prompt = f"""
+                Analyze this infrastructure monitoring request:
+                Action: {action}
+                Parameters: {params}
+                
+                Based on my capabilities: {self.capabilities}
+                
+                Provide guidance on how to handle this request.
+                """
+                result = await self.invoke_semantic_function(analysis_prompt)
                 
             return {
                 'agent': self.name,

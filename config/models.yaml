@@ -1,0 +1,53 @@
+# Model Configuration for DevOps Sentinel Multi-Agent System
+# Each agent can use a different Azure OpenAI deployment/model
+
+agents:
+  infrastructure_monitor:
+    deployment_name: "gpt-4"
+    model: "gpt-4"
+    temperature: 0.3
+    max_tokens: 2000
+    description: "High accuracy model for infrastructure analysis"
+    
+  rca_analyzer:
+    deployment_name: "gpt-4-turbo"
+    model: "gpt-4-turbo-preview"
+    temperature: 0.5
+    max_tokens: 3000
+    description: "Advanced reasoning for root cause analysis"
+    
+  cost_optimizer:
+    deployment_name: "gpt-35-turbo"
+    model: "gpt-3.5-turbo"
+    temperature: 0.2
+    max_tokens: 1500
+    description: "Efficient model for cost calculations"
+    
+  deployment_manager:
+    deployment_name: "gpt-35-turbo"
+    model: "gpt-3.5-turbo"
+    temperature: 0.1
+    max_tokens: 1000
+    description: "Precise model for deployment operations"
+    
+  report_generator:
+    deployment_name: "gpt-4"
+    model: "gpt-4"
+    temperature: 0.7
+    max_tokens: 4000
+    description: "Creative model for comprehensive reports"
+    
+  kubernetes_agent:
+    deployment_name: "gpt-35-turbo"
+    model: "gpt-3.5-turbo"
+    temperature: 0.3
+    max_tokens: 2000
+    description: "Fast model for Kubernetes operations"
+
+# Default settings for all agents
+defaults:
+  api_version: "2024-02-01"
+  top_p: 0.95
+  frequency_penalty: 0
+  presence_penalty: 0
+  stop_sequences: []

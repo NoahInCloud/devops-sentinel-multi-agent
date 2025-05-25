@@ -1,264 +1,577 @@
-"""Kubernetes agent for cluster management and kagent integration."""
+"""Kubernetes agent for AKS cluster management and monitoring."""
 
 import asyncio
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
+import os
 
-from .base_agent import BaseDevOpsAgent, DevOpsAgentPlugin
+from kubernetes import client, config
+from kubernetes.client.rest import ApiException
+from azure.mgmt.containerservice import ContainerServiceClient
+
+from utils.azure_client import get_azure_client_manager
+from agents.base_agent import BaseDevOpsAgent, DevOpsAgentPlugin
+from semantic_kernel.functions import kernel_function
 
 
 class KubernetesAgentPlugin(DevOpsAgentPlugin):
-    """Plugin for Kubernetes management capabilities."""
+    """Plugin for Kubernetes/AKS management capabilities."""
     
-    def __init__(self, cluster_config: Dict[str, Any]):
+    def __init__(self, cluster_config: Dict[str, Any], subscription_id: str):
         super().__init__("kubernetes_agent")
         self.cluster_config = cluster_config
-        self.kagent_endpoint = cluster_config.get('kagent_endpoint', 'http://kagent-service:8080')
+        self.subscription_id = subscription_id
+        self.azure_clients = get_azure_client_manager(subscription_id)
+        self.k8s_clients = {}
+        self._initialized = False
         
-    async def get_cluster_status(self) -> str:
-        """Get comprehensive Kubernetes cluster status."""
+    async def initialize_k8s_clients(self):
+        """Initialize Kubernetes clients for AKS clusters."""
         try:
-            self.logger.info("Getting Kubernetes cluster status")
+            # Load kubeconfig if specified
+            kubeconfig_path = self.cluster_config.get('kubeconfig_path')
+            if kubeconfig_path and os.path.exists(os.path.expanduser(kubeconfig_path)):
+                config.load_kube_config(config_file=os.path.expanduser(kubeconfig_path))
+                self.k8s_clients['core'] = client.CoreV1Api()
+                self.k8s_clients['apps'] = client.AppsV1Api()
+                self.k8s_clients['batch'] = client.BatchV1Api()
+                self.k8s_clients['networking'] = client.NetworkingV1Api()
+                self._initialized = True
+                self.logger.info("Kubernetes clients initialized from kubeconfig")
+            else:
+                # Try to use in-cluster config (if running in K8s)
+                try:
+                    config.load_incluster_config()
+                    self.k8s_clients['core'] = client.CoreV1Api()
+                    self.k8s_clients['apps'] = client.AppsV1Api()
+                    self.k8s_clients['batch'] = client.BatchV1Api()
+                    self.k8s_clients['networking'] = client.NetworkingV1Api()
+                    self._initialized = True
+                    self.logger.info("Kubernetes clients initialized from in-cluster config")
+                except:
+                    self.logger.warning("No Kubernetes configuration available")
+        except Exception as e:
+            self.logger.error(f"Error initializing Kubernetes clients: {str(e)}")
+    
+    @kernel_function(name="get_aks_clusters", description="List all AKS clusters in the subscription")
+    async def get_aks_clusters(self) -> str:
+        """Get all AKS clusters in the Azure subscription."""
+        try:
+            container_client = self.azure_clients.get_container_service_client()
             
-            # Mock cluster data for demonstration
-            cluster_data = {
-                'cluster_name': self.cluster_config.get('cluster_name', 'production-cluster'),
-                'kubernetes_version': '1.28.3',
-                'nodes': {
-                    'total': 6,
-                    'ready': 5,
-                    'not_ready': 1,
-                    'master': 3,
-                    'worker': 3
-                },
-                'pods': {
-                    'total': 125,
-                    'running': 118,
-                    'pending': 3,
-                    'failed': 2,
-                    'succeeded': 2
-                },
-                'namespaces': 15,
-                'services': 45,
-                'cpu_usage': 65.2,
-                'memory_usage': 72.8,
-                'storage_usage': 58.3
-            }
+            clusters = list(container_client.managed_clusters.list())
             
-            result = f"Kubernetes Cluster Status:\n\n"
-            result += f"🏗️ Cluster Information:\n"
-            result += f"• Cluster Name: {cluster_data['cluster_name']}\n"
-            result += f"• Kubernetes Version: {cluster_data['kubernetes_version']}\n"
-            result += f"• Namespaces: {cluster_data['namespaces']}\n"
-            result += f"• Services: {cluster_data['services']}\n\n"
+            result = f"AKS Clusters in Subscription:\n\n"
+            result += f"📊 Total Clusters: {len(clusters)}\n\n"
             
-            result += f"🖥️ Node Status:\n"
-            result += f"• Total Nodes: {cluster_data['nodes']['total']}\n"
-            result += f"• Ready Nodes: {cluster_data['nodes']['ready']}\n"
-            result += f"• Not Ready Nodes: {cluster_data['nodes']['not_ready']}\n"
-            result += f"• Master Nodes: {cluster_data['nodes']['master']}\n"
-            result += f"• Worker Nodes: {cluster_data['nodes']['worker']}\n\n"
+            for cluster in clusters:
+                result += f"🏗️ **{cluster.name}**\n"
+                result += f"• Resource Group: {cluster.id.split('/')[4]}\n"
+                result += f"• Location: {cluster.location}\n"
+                result += f"• Kubernetes Version: {cluster.kubernetes_version}\n"
+                result += f"• Node Pools: {len(cluster.agent_pool_profiles)}\n"
+                
+                # Calculate total nodes
+                total_nodes = sum(pool.count for pool in cluster.agent_pool_profiles if pool.count)
+                result += f"• Total Nodes: {total_nodes}\n"
+                
+                result += f"• Status: {cluster.provisioning_state}\n"
+                result += f"• SKU: {cluster.sku.tier if cluster.sku else 'Free'}\n\n"
             
-            result += f"🐳 Pod Status:\n"
-            result += f"• Total Pods: {cluster_data['pods']['total']}\n"
-            result += f"• Running: {cluster_data['pods']['running']}\n"
-            result += f"• Pending: {cluster_data['pods']['pending']}\n"
-            result += f"• Failed: {cluster_data['pods']['failed']}\n"
-            result += f"• Succeeded: {cluster_data['pods']['succeeded']}\n\n"
-            
-            result += f"📊 Resource Utilization:\n"
-            result += f"• CPU Usage: {cluster_data['cpu_usage']:.1f}%\n"
-            result += f"• Memory Usage: {cluster_data['memory_usage']:.1f}%\n"
-            result += f"• Storage Usage: {cluster_data['storage_usage']:.1f}%\n"
+            if not clusters:
+                result += "No AKS clusters found in the subscription.\n"
             
             return result
             
+        except Exception as e:
+            self.logger.error(f"Error getting AKS clusters: {str(e)}")
+            return f"Error getting AKS clusters: {str(e)}"
+    
+    @kernel_function(name="get_cluster_status", description="Get comprehensive AKS cluster status")
+    async def get_cluster_status(self, cluster_name: Optional[str] = None) -> str:
+        """Get comprehensive Kubernetes cluster status."""
+        try:
+            # First, try to get AKS cluster info from Azure
+            aks_info = ""
+            if cluster_name:
+                aks_info = await self._get_aks_cluster_info(cluster_name)
+            
+            # If K8s clients not initialized, try now
+            if not self._initialized:
+                await self.initialize_k8s_clients()
+            
+            if not self._initialized or not self.k8s_clients:
+                # Return AKS info only
+                return f"Kubernetes Cluster Status:\n\n{aks_info}\n\n⚠️ Direct cluster access not configured. Please set up kubeconfig to get detailed pod and service information."
+            
+            # Get cluster details from Kubernetes API
+            result = f"Kubernetes Cluster Status:\n\n"
+            
+            if aks_info:
+                result += f"{aks_info}\n"
+            
+            # Get nodes
+            nodes = self.k8s_clients['core'].list_node()
+            node_count = len(nodes.items)
+            ready_nodes = sum(1 for node in nodes.items if self._is_node_ready(node))
+            
+            result += f"📊 Cluster Resources:\n"
+            result += f"• Total Nodes: {node_count}\n"
+            result += f"• Ready Nodes: {ready_nodes}\n"
+            
+            # Node details
+            total_cpu = 0
+            total_memory = 0
+            for node in nodes.items:
+                cpu = node.status.capacity.get('cpu', '0')
+                memory = node.status.capacity.get('memory', '0Ki')
+                total_cpu += int(cpu)
+                total_memory += self._parse_memory(memory)
+            
+            result += f"• Total CPU: {total_cpu} cores\n"
+            result += f"• Total Memory: {total_memory / (1024**3):.1f} GB\n\n"
+            
+            # Get namespace summary
+            namespaces = self.k8s_clients['core'].list_namespace()
+            result += f"📁 Namespaces: {len(namespaces.items)}\n"
+            
+            # Get pod summary
+            all_pods = self.k8s_clients['core'].list_pod_for_all_namespaces()
+            pod_status = {'Running': 0, 'Pending': 0, 'Failed': 0, 'Succeeded': 0, 'Unknown': 0}
+            
+            for pod in all_pods.items:
+                status = pod.status.phase
+                pod_status[status] = pod_status.get(status, 0) + 1
+            
+            result += f"\n🐳 Pod Status Summary:\n"
+            result += f"• Total Pods: {len(all_pods.items)}\n"
+            for status, count in pod_status.items():
+                if count > 0:
+                    result += f"• {status}: {count}\n"
+            
+            # Get services
+            services = self.k8s_clients['core'].list_service_for_all_namespaces()
+            result += f"\n🌐 Services: {len(services.items)}\n"
+            
+            # Get deployments
+            deployments = self.k8s_clients['apps'].list_deployment_for_all_namespaces()
+            ready_deployments = sum(1 for d in deployments.items 
+                                  if d.status.ready_replicas == d.spec.replicas)
+            result += f"\n🚀 Deployments:\n"
+            result += f"• Total: {len(deployments.items)}\n"
+            result += f"• Ready: {ready_deployments}\n"
+            
+            # Resource usage summary
+            result += await self._get_resource_usage_summary()
+            
+            return result
+            
+        except ApiException as e:
+            self.logger.error(f"Kubernetes API error: {str(e)}")
+            return f"Error accessing Kubernetes cluster: {str(e)}"
         except Exception as e:
             self.logger.error(f"Error getting cluster status: {str(e)}")
             return f"Error getting cluster status: {str(e)}"
     
-    async def get_pod_logs(self, namespace: str, pod_name: str, lines: int = 100) -> str:
-        """Get logs from a specific pod."""
+    async def _get_aks_cluster_info(self, cluster_name: str) -> str:
+        """Get AKS cluster information from Azure."""
         try:
-            self.logger.info(f"Getting logs for pod {pod_name} in namespace {namespace}")
+            container_client = self.azure_clients.get_container_service_client()
             
-            # Mock log data
-            logs = [
-                "2024-05-23T10:30:01Z INFO Application started successfully",
-                "2024-05-23T10:30:05Z INFO Connected to database",
-                "2024-05-23T10:30:10Z INFO Server listening on port 8080",
-                "2024-05-23T10:31:15Z DEBUG Processing request from 10.0.1.25",
-                "2024-05-23T10:31:20Z WARN High memory usage detected: 85%",
-                "2024-05-23T10:32:01Z INFO Request completed successfully",
-                "2024-05-23T10:32:30Z ERROR Database connection timeout",
-                "2024-05-23T10:32:35Z INFO Retrying database connection",
-                "2024-05-23T10:32:40Z INFO Database connection restored"
-            ]
+            # Find the cluster
+            clusters = list(container_client.managed_clusters.list())
+            target_cluster = None
             
-            result = f"Pod Logs - {namespace}/{pod_name} (Last {lines} lines):\n\n"
-            for log_line in logs[-lines:]:
-                result += f"{log_line}\n"
+            for cluster in clusters:
+                if cluster.name.lower() == cluster_name.lower():
+                    target_cluster = cluster
+                    break
+            
+            if not target_cluster:
+                return f"AKS cluster '{cluster_name}' not found."
+            
+            result = f"🏗️ AKS Cluster: {target_cluster.name}\n"
+            result += f"• Resource Group: {target_cluster.id.split('/')[4]}\n"
+            result += f"• Location: {target_cluster.location}\n"
+            result += f"• Version: {target_cluster.kubernetes_version}\n"
+            result += f"• DNS Prefix: {target_cluster.dns_prefix}\n"
+            result += f"• FQDN: {target_cluster.fqdn}\n"
+            
+            # Node pool information
+            result += f"\n📊 Node Pools:\n"
+            for pool in target_cluster.agent_pool_profiles:
+                result += f"• {pool.name}: {pool.count} nodes ({pool.vm_size})\n"
+                if pool.enable_auto_scaling:
+                    result += f"  Auto-scaling: {pool.min_count}-{pool.max_count}\n"
             
             return result
             
+        except Exception as e:
+            self.logger.error(f"Error getting AKS info: {str(e)}")
+            return ""
+    
+    @kernel_function(name="get_pod_logs", description="Get logs from a specific pod")
+    async def get_pod_logs(self, namespace: str, pod_name: str, lines: int = 100) -> str:
+        """Get logs from a specific pod."""
+        try:
+            if not self._initialized:
+                await self.initialize_k8s_clients()
+                
+            if not self._initialized:
+                return "Kubernetes client not initialized. Please configure kubeconfig."
+            
+            self.logger.info(f"Getting logs for pod {pod_name} in namespace {namespace}")
+            
+            # Get pod to verify it exists
+            try:
+                pod = self.k8s_clients['core'].read_namespaced_pod(
+                    name=pod_name,
+                    namespace=namespace
+                )
+            except ApiException as e:
+                if e.status == 404:
+                    return f"Pod {namespace}/{pod_name} not found."
+                raise
+            
+            # Get logs
+            logs = self.k8s_clients['core'].read_namespaced_pod_log(
+                name=pod_name,
+                namespace=namespace,
+                tail_lines=lines
+            )
+            
+            result = f"Pod Logs - {namespace}/{pod_name} (Last {lines} lines):\n\n"
+            result += f"Container: {pod.spec.containers[0].name}\n"
+            result += f"Status: {pod.status.phase}\n"
+            result += f"Node: {pod.spec.node_name}\n\n"
+            result += "="*60 + "\n"
+            result += logs
+            
+            return result
+            
+        except ApiException as e:
+            self.logger.error(f"Kubernetes API error: {str(e)}")
+            return f"Error getting pod logs: {str(e)}"
         except Exception as e:
             self.logger.error(f"Error getting pod logs: {str(e)}")
             return f"Error getting pod logs: {str(e)}"
     
+    @kernel_function(name="scale_deployment", description="Scale a Kubernetes deployment")
     async def scale_deployment(self, namespace: str, deployment_name: str, replicas: int) -> str:
         """Scale a Kubernetes deployment."""
         try:
+            if not self._initialized:
+                await self.initialize_k8s_clients()
+                
+            if not self._initialized:
+                return "Kubernetes client not initialized. Please configure kubeconfig."
+            
             self.logger.info(f"Scaling deployment {deployment_name} in namespace {namespace} to {replicas} replicas")
             
-            # Mock scaling operation
+            # Get current deployment
+            deployment = self.k8s_clients['apps'].read_namespaced_deployment(
+                name=deployment_name,
+                namespace=namespace
+            )
+            
+            current_replicas = deployment.spec.replicas
+            
+            # Update replica count
+            deployment.spec.replicas = replicas
+            
+            # Apply the change
+            self.k8s_clients['apps'].patch_namespaced_deployment_scale(
+                name=deployment_name,
+                namespace=namespace,
+                body={'spec': {'replicas': replicas}}
+            )
+            
             result = f"Deployment Scaling:\n\n"
-            result += f"• Namespace: {namespace}\n"
-            result += f"• Deployment: {deployment_name}\n"
+            result += f"✅ Successfully initiated scaling for {namespace}/{deployment_name}\n"
+            result += f"• Previous Replicas: {current_replicas}\n"
             result += f"• Target Replicas: {replicas}\n"
-            result += f"• Status: Scaling in progress...\n"
-            result += f"• Estimated completion: 2-3 minutes\n"
+            result += f"• Change: {replicas - current_replicas:+d}\n\n"
             
-            # Simulate scaling delay
-            await asyncio.sleep(0.1)
+            # Wait a moment and check status
+            await asyncio.sleep(2)
             
-            result += f"\n✅ Scaling completed successfully!\n"
-            result += f"Deployment {deployment_name} now has {replicas} replicas running.\n"
+            # Get updated deployment
+            updated = self.k8s_clients['apps'].read_namespaced_deployment(
+                name=deployment_name,
+                namespace=namespace
+            )
+            
+            result += f"📊 Current Status:\n"
+            result += f"• Desired Replicas: {updated.spec.replicas}\n"
+            result += f"• Current Replicas: {updated.status.replicas or 0}\n"
+            result += f"• Ready Replicas: {updated.status.ready_replicas or 0}\n"
+            result += f"• Available Replicas: {updated.status.available_replicas or 0}\n"
+            
+            if updated.status.conditions:
+                latest_condition = updated.status.conditions[-1]
+                result += f"\n📋 Latest Condition:\n"
+                result += f"• Type: {latest_condition.type}\n"
+                result += f"• Status: {latest_condition.status}\n"
+                result += f"• Reason: {latest_condition.reason}\n"
             
             return result
             
+        except ApiException as e:
+            self.logger.error(f"Kubernetes API error: {str(e)}")
+            return f"Error scaling deployment: {str(e)}"
         except Exception as e:
             self.logger.error(f"Error scaling deployment: {str(e)}")
             return f"Error scaling deployment: {str(e)}"
     
-    async def get_resource_usage(self, namespace: str = None) -> str:
+    @kernel_function(name="get_resource_usage", description="Get resource usage for cluster or namespace")
+    async def get_resource_usage(self, namespace: Optional[str] = None) -> str:
         """Get resource usage for cluster or specific namespace."""
         try:
-            scope = f"namespace {namespace}" if namespace else "cluster"
+            if not self._initialized:
+                await self.initialize_k8s_clients()
+                
+            if not self._initialized:
+                return "Kubernetes client not initialized. Please configure kubeconfig."
+            
+            scope = f"namespace '{namespace}'" if namespace else "entire cluster"
             self.logger.info(f"Getting resource usage for {scope}")
             
-            # Mock resource usage data
+            result = f"Resource Usage Report - {scope}:\n\n"
+            
+            # Get pods
             if namespace:
-                usage_data = {
-                    'namespace': namespace,
-                    'cpu': {'requests': '1.2 cores', 'limits': '2.4 cores', 'usage': '0.8 cores'},
-                    'memory': {'requests': '2.1 GiB', 'limits': '4.2 GiB', 'usage': '1.6 GiB'},
-                    'pods': 12,
-                    'services': 8
-                }
-                
-                result = f"Resource Usage - Namespace: {namespace}\n\n"
-                result += f"🐳 Pods: {usage_data['pods']}\n"
-                result += f"🌐 Services: {usage_data['services']}\n\n"
-                
+                pods = self.k8s_clients['core'].list_namespaced_pod(namespace)
             else:
-                usage_data = {
-                    'cpu': {'total': '24 cores', 'used': '15.6 cores', 'percentage': 65.0},
-                    'memory': {'total': '96 GiB', 'used': '69.8 GiB', 'percentage': 72.7},
-                    'storage': {'total': '1000 GiB', 'used': '583 GiB', 'percentage': 58.3}
-                }
-                
-                result = f"Cluster Resource Usage:\n\n"
+                pods = self.k8s_clients['core'].list_pod_for_all_namespaces()
+            
+            # Calculate resource requests and limits
+            total_cpu_requests = 0
+            total_cpu_limits = 0
+            total_memory_requests = 0
+            total_memory_limits = 0
+            pod_count = len(pods.items)
+            
+            for pod in pods.items:
+                for container in pod.spec.containers:
+                    if container.resources:
+                        if container.resources.requests:
+                            cpu_req = container.resources.requests.get('cpu', '0')
+                            mem_req = container.resources.requests.get('memory', '0')
+                            total_cpu_requests += self._parse_cpu(cpu_req)
+                            total_memory_requests += self._parse_memory(mem_req)
+                        
+                        if container.resources.limits:
+                            cpu_lim = container.resources.limits.get('cpu', '0')
+                            mem_lim = container.resources.limits.get('memory', '0')
+                            total_cpu_limits += self._parse_cpu(cpu_lim)
+                            total_memory_limits += self._parse_memory(mem_lim)
+            
+            result += f"📊 Resource Summary:\n"
+            result += f"• Total Pods: {pod_count}\n\n"
             
             result += f"💻 CPU:\n"
-            if namespace:
-                result += f"• Requests: {usage_data['cpu']['requests']}\n"
-                result += f"• Limits: {usage_data['cpu']['limits']}\n"
-                result += f"• Current Usage: {usage_data['cpu']['usage']}\n"
-            else:
-                result += f"• Total: {usage_data['cpu']['total']}\n"
-                result += f"• Used: {usage_data['cpu']['used']} ({usage_data['cpu']['percentage']:.1f}%)\n"
+            result += f"• Total Requests: {total_cpu_requests:.2f} cores\n"
+            result += f"• Total Limits: {total_cpu_limits:.2f} cores\n"
+            result += f"• Average per Pod: {total_cpu_requests/pod_count:.2f} cores\n\n" if pod_count > 0 else "\n"
             
-            result += f"\n🧠 Memory:\n"
-            if namespace:
-                result += f"• Requests: {usage_data['memory']['requests']}\n"
-                result += f"• Limits: {usage_data['memory']['limits']}\n"
-                result += f"• Current Usage: {usage_data['memory']['usage']}\n"
-            else:
-                result += f"• Total: {usage_data['memory']['total']}\n"
-                result += f"• Used: {usage_data['memory']['used']} ({usage_data['memory']['percentage']:.1f}%)\n"
+            result += f"🧠 Memory:\n"
+            result += f"• Total Requests: {total_memory_requests/(1024**3):.2f} GB\n"
+            result += f"• Total Limits: {total_memory_limits/(1024**3):.2f} GB\n"
+            result += f"• Average per Pod: {total_memory_requests/(1024**3)/pod_count:.2f} GB\n\n" if pod_count > 0 else "\n"
             
-            if not namespace:
-                result += f"\n💾 Storage:\n"
-                result += f"• Total: {usage_data['storage']['total']}\n"
-                result += f"• Used: {usage_data['storage']['used']} ({usage_data['storage']['percentage']:.1f}%)\n"
+            # Top resource consumers
+            if pods.items:
+                result += "🔝 Top Resource Consumers:\n"
+                
+                # Sort pods by CPU requests
+                pod_resources = []
+                for pod in pods.items:
+                    cpu_req = 0
+                    mem_req = 0
+                    for container in pod.spec.containers:
+                        if container.resources and container.resources.requests:
+                            cpu_req += self._parse_cpu(container.resources.requests.get('cpu', '0'))
+                            mem_req += self._parse_memory(container.resources.requests.get('memory', '0'))
+                    
+                    pod_resources.append({
+                        'name': pod.metadata.name,
+                        'namespace': pod.metadata.namespace,
+                        'cpu': cpu_req,
+                        'memory': mem_req
+                    })
+                
+                # Top 5 by CPU
+                top_cpu = sorted(pod_resources, key=lambda x: x['cpu'], reverse=True)[:5]
+                result += "\nBy CPU:\n"
+                for i, pod in enumerate(top_cpu, 1):
+                    result += f"{i}. {pod['namespace']}/{pod['name']}: {pod['cpu']:.2f} cores\n"
+                
+                # Top 5 by Memory
+                top_mem = sorted(pod_resources, key=lambda x: x['memory'], reverse=True)[:5]
+                result += "\nBy Memory:\n"
+                for i, pod in enumerate(top_mem, 1):
+                    result += f"{i}. {pod['namespace']}/{pod['name']}: {pod['memory']/(1024**3):.2f} GB\n"
             
             return result
             
+        except ApiException as e:
+            self.logger.error(f"Kubernetes API error: {str(e)}")
+            return f"Error getting resource usage: {str(e)}"
         except Exception as e:
             self.logger.error(f"Error getting resource usage: {str(e)}")
             return f"Error getting resource usage: {str(e)}"
     
-    async def kagent_integration(self, action: str, params: Dict[str, Any]) -> str:
-        """Integrate with kagent for advanced Kubernetes operations."""
+    async def _get_resource_usage_summary(self) -> str:
+        """Get cluster-wide resource usage summary."""
         try:
-            self.logger.info(f"Executing kagent action: {action}")
+            if not self._initialized:
+                return ""
             
-            # Mock kagent integration
-            result = f"KAgent Integration - {action}:\n\n"
-            
-            if action == 'auto_scale':
-                result += f"🔄 Auto-scaling analysis:\n"
-                result += f"• Current load: {params.get('current_load', 'High')}\n"
-                result += f"• Recommended action: Scale up by 2 replicas\n"
-                result += f"• Confidence: 95%\n"
-                result += f"• Expected improvement: 30% response time reduction\n"
+            # Get node metrics if available
+            try:
+                # This requires metrics-server to be installed
+                from kubernetes.client import CustomObjectsApi
+                custom_api = CustomObjectsApi()
                 
-            elif action == 'anomaly_detection':
-                result += f"🔍 Anomaly detection results:\n"
-                result += f"• Anomalies detected: 2\n"
-                result += f"• Pod 'api-server-3' showing unusual memory pattern\n"
-                result += f"• Service 'payment-service' has elevated error rates\n"
-                result += f"• Recommended: Investigate and possibly restart affected pods\n"
+                node_metrics = custom_api.list_cluster_custom_object(
+                    group="metrics.k8s.io",
+                    version="v1beta1",
+                    plural="nodes"
+                )
                 
-            elif action == 'performance_optimization':
-                result += f"⚡ Performance optimization recommendations:\n"
-                result += f"• Resource requests are under-allocated for 'web-app' deployment\n"
-                result += f"• Consider implementing HPA for 'api-gateway'\n"
-                result += f"• Node affinity rules could improve pod distribution\n"
-                result += f"• Estimated performance gain: 25%\n"
+                result = "\n📈 Current Resource Usage:\n"
                 
-            elif action == 'security_scan':
-                result += f"🔒 Security scan results:\n"
-                result += f"• 3 pods running with elevated privileges\n"
-                result += f"• 2 services missing network policies\n"
-                result += f"• 1 deployment using outdated base image\n"
-                result += f"• Recommended: Apply security best practices\n"
+                for node in node_metrics.get('items', []):
+                    node_name = node['metadata']['name']
+                    cpu_usage = self._parse_cpu(node['usage']['cpu'])
+                    memory_usage = self._parse_memory(node['usage']['memory'])
+                    
+                    result += f"• {node_name}: CPU {cpu_usage:.1f} cores, Memory {memory_usage/(1024**3):.1f} GB\n"
                 
-            else:
-                result += f"Unknown kagent action: {action}\n"
-            
-            result += f"\n📊 KAgent Analysis completed at {datetime.utcnow().isoformat()}\n"
-            
-            return result
-            
+                return result
+                
+            except:
+                # Metrics server not available
+                return "\n💡 Install metrics-server for real-time resource usage data.\n"
+                
         except Exception as e:
-            self.logger.error(f"Error in kagent integration: {str(e)}")
-            return f"Error in kagent integration: {str(e)}"
+            self.logger.warning(f"Could not get resource metrics: {str(e)}")
+            return ""
+    
+    def _is_node_ready(self, node) -> bool:
+        """Check if a node is ready."""
+        if node.status.conditions:
+            for condition in node.status.conditions:
+                if condition.type == "Ready":
+                    return condition.status == "True"
+        return False
+    
+    def _parse_cpu(self, cpu_str: str) -> float:
+        """Parse CPU string to float (in cores)."""
+        if not cpu_str or cpu_str == '0':
+            return 0.0
+        
+        cpu_str = str(cpu_str)
+        if cpu_str.endswith('m'):
+            return float(cpu_str[:-1]) / 1000
+        elif cpu_str.endswith('n'):
+            return float(cpu_str[:-1]) / 1000000000
+        else:
+            return float(cpu_str)
+    
+    def _parse_memory(self, mem_str: str) -> float:
+        """Parse memory string to float (in bytes)."""
+        if not mem_str or mem_str == '0':
+            return 0.0
+        
+        mem_str = str(mem_str)
+        
+        # Remove 'i' suffix if present (e.g., Ki, Mi, Gi)
+        if mem_str.endswith('i'):
+            mem_str = mem_str[:-1]
+            
+        if mem_str.endswith('K'):
+            return float(mem_str[:-1]) * 1024
+        elif mem_str.endswith('M'):
+            return float(mem_str[:-1]) * 1024 * 1024
+        elif mem_str.endswith('G'):
+            return float(mem_str[:-1]) * 1024 * 1024 * 1024
+        elif mem_str.endswith('T'):
+            return float(mem_str[:-1]) * 1024 * 1024 * 1024 * 1024
+        else:
+            return float(mem_str)
+    
+    @kernel_function(name="analyze_cluster_health", description="Analyze AKS cluster health using AI")
+    async def analyze_cluster_health(self, cluster_name: Optional[str] = None) -> str:
+        """Use AI to analyze cluster health and provide recommendations."""
+        try:
+            # Get cluster status
+            status = await self.get_cluster_status(cluster_name)
+            
+            if hasattr(self, 'agent'):
+                health_prompt = f"""
+                Analyze the following Kubernetes/AKS cluster status:
+                
+                {status}
+                
+                Provide:
+                1. Overall health assessment
+                2. Potential issues or risks
+                3. Performance optimization recommendations
+                4. Security considerations
+                5. Scaling recommendations
+                6. Best practices that should be implemented
+                
+                Focus on actionable insights.
+                """
+                
+                analysis = await self.agent.invoke_semantic_function(health_prompt)
+                
+                result = f"🤖 AI-Powered Cluster Analysis:\n\n{analysis}"
+                return result
+            else:
+                return "AI analysis requires model configuration."
+                
+        except Exception as e:
+            self.logger.error(f"Error analyzing cluster health: {str(e)}")
+            return f"Error analyzing cluster health: {str(e)}"
 
 
 class KubernetesAgent(BaseDevOpsAgent):
-    """Agent responsible for Kubernetes cluster management and kagent integration."""
+    """Agent responsible for Kubernetes/AKS cluster management."""
     
     def __init__(self, cluster_config: Dict[str, Any]):
-        super().__init__("KubernetesAgent", "Manages Kubernetes clusters and integrates with kagent")
+        super().__init__(
+            name="KubernetesAgent",
+            description="Manages Kubernetes/AKS clusters and workloads",
+            agent_type="kubernetes_agent"
+        )
         self.cluster_config = cluster_config
+        self.subscription_id = os.getenv('AZURE_SUBSCRIPTION_ID', '')
         self.capabilities = [
+            "aks_cluster_management",
             "cluster_monitoring",
             "pod_management",
             "resource_scaling",
             "log_analysis",
-            "kagent_integration"
+            "resource_usage_analysis",
+            "ai_health_analysis"
         ]
         
     async def _setup_plugins(self):
         """Setup Kubernetes management plugins."""
-        self.k8s_plugin = KubernetesAgentPlugin(self.cluster_config)
-        self.kernel.add_plugin(
-            plugin=self.k8s_plugin,
-            plugin_name="kubernetes_agent",
-            description="Kubernetes management capabilities"
-        )
+        self.k8s_plugin = KubernetesAgentPlugin(self.cluster_config, self.subscription_id)
+        self.k8s_plugin.agent = self  # Give plugin access to agent
+        
+        # Initialize Kubernetes clients
+        await self.k8s_plugin.initialize_k8s_clients()
+        
+        if self.kernel:
+            self.kernel.add_plugin(
+                self.k8s_plugin,
+                "KubernetesAgent"
+            )
         
     async def process_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Process Kubernetes management requests."""
@@ -266,27 +579,45 @@ class KubernetesAgent(BaseDevOpsAgent):
         params = request.get('parameters', {})
         
         try:
-            if action == 'get_cluster_status':
-                result = await self.k8s_plugin.get_cluster_status()
+            if action == 'list_clusters':
+                result = await self.k8s_plugin.get_aks_clusters()
+                
+            elif action == 'get_cluster_status':
+                cluster_name = params.get('cluster_name')
+                result = await self.k8s_plugin.get_cluster_status(cluster_name)
+                
             elif action == 'get_pod_logs':
                 namespace = params.get('namespace', 'default')
                 pod_name = params.get('pod_name', '')
                 lines = params.get('lines', 100)
                 result = await self.k8s_plugin.get_pod_logs(namespace, pod_name, lines)
+                
             elif action == 'scale_deployment':
                 namespace = params.get('namespace', 'default')
                 deployment_name = params.get('deployment_name', '')
                 replicas = params.get('replicas', 1)
                 result = await self.k8s_plugin.scale_deployment(namespace, deployment_name, replicas)
+                
             elif action == 'get_resource_usage':
                 namespace = params.get('namespace')
                 result = await self.k8s_plugin.get_resource_usage(namespace)
-            elif action == 'kagent_action':
-                kagent_action = params.get('kagent_action', '')
-                kagent_params = params.get('kagent_params', {})
-                result = await self.k8s_plugin.kagent_integration(kagent_action, kagent_params)
+                
+            elif action == 'analyze_health':
+                cluster_name = params.get('cluster_name')
+                result = await self.k8s_plugin.analyze_cluster_health(cluster_name)
+                
             else:
-                result = f"Unknown action: {action}"
+                # Use AI for unknown requests
+                analysis_prompt = f"""
+                Analyze this Kubernetes request:
+                Action: {action}
+                Parameters: {params}
+                
+                Based on my Kubernetes capabilities: {self.capabilities}
+                
+                Provide guidance on handling this request.
+                """
+                result = await self.invoke_semantic_function(analysis_prompt)
                 
             return {
                 'agent': self.name,
