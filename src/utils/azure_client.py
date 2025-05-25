@@ -1,5 +1,12 @@
 """Azure client management for DevOps Sentinel multi-agent system."""
 
+# Fix Azure imports FIRST
+try:
+    import azure
+    azure.__path__ = azure.__extend_path__(azure.__path__, azure.__name__)
+except:
+    pass
+
 import os
 import logging
 from typing import Dict, Any, Optional
@@ -13,8 +20,10 @@ from azure.mgmt.compute import ComputeManagementClient
 from azure.mgmt.containerservice import ContainerServiceClient
 from azure.mgmt.network import NetworkManagementClient
 from azure.mgmt.storage import StorageManagementClient
-from azure.monitor.query import LogsQueryClient, MetricsQueryClient
 from azure.mgmt.loganalytics import LogAnalyticsManagementClient
+import azure.monitor.query
+LogsQueryClient = azure.monitor.query.LogsQueryClient
+MetricsQueryClient = azure.monitor.query.MetricsQueryClient
 
 logger = logging.getLogger(__name__)
 

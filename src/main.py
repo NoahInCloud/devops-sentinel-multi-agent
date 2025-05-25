@@ -1,5 +1,12 @@
 """Main entry point for DevOps Sentinel Multi-Agent System."""
 
+# Fix Azure imports FIRST
+try:
+    import azure
+    azure.__path__ = azure.__extend_path__(azure.__path__, azure.__name__)
+except:
+    pass
+
 import asyncio
 import logging
 import os
@@ -11,6 +18,8 @@ from core.orchestrator import DevOpsOrchestrator
 from interfaces.chat_interface import ChatInterface
 from interfaces.audio_handler import AudioHandler
 from communication.websocket_handler import WebSocketHandler
+
+
 
 
 async def initialize_system():

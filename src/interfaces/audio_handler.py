@@ -19,6 +19,10 @@ class AudioHandler:
         self.config = config
         self.logger = logging.getLogger("audio_handler")
         self.app = Quart(__name__)
+        
+        # Fix the PROVIDE_AUTOMATIC_OPTIONS error
+        self.app.config['PROVIDE_AUTOMATIC_OPTIONS'] = True
+        
         self.active_audio_sessions: Dict[str, Dict[str, Any]] = {}
         
         # Audio configuration

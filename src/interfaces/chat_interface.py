@@ -16,6 +16,10 @@ class ChatInterface:
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.app = Quart(__name__)
+        
+        # Fix the PROVIDE_AUTOMATIC_OPTIONS error
+        self.app.config['PROVIDE_AUTOMATIC_OPTIONS'] = True
+        
         self.logger = logging.getLogger("chat_interface")
         self.orchestrator = None
         self.active_sessions: Dict[str, Dict[str, Any]] = {}

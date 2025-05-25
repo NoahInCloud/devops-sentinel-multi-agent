@@ -216,7 +216,7 @@ def test_system():
         print("✅ Core imports successful")
         
         # Test Azure connection
-        from utils.azure_clients import get_azure_client_manager
+        from utils.azure_client import get_azure_client_manager
         print("\nTesting Azure connection...")
         
         # This will use the .env file

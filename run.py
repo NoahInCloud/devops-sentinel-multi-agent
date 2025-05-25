@@ -8,10 +8,18 @@ import sys
 import logging
 from pathlib import Path
 
+# FIX AZURE IMPORTS - This MUST be before adding src to path
+try:
+    import azure
+    azure.__path__ = azure.__extend_path__(azure.__path__, azure.__name__)
+except:
+    pass
+
 # Add the src directory to the Python path
 src_path = Path(__file__).parent / "src"
 sys.path.insert(0, str(src_path))
 
+# NOW do the imports that use Azure
 try:
     from main import main
     
