@@ -282,7 +282,7 @@ If you find this project useful, please consider giving it a star ⭐
 ---
 
 <p align="center">
-  <strong>Built with ❤️ by the DevOps Community</strong>
+  <strong>Built with ❤️ 
 </p>
 
 <p align="center">
